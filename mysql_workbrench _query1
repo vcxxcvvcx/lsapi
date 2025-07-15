@@ -1,0 +1,14 @@
+CREATE DATABASE IF NOT EXISTS stock_data;
+
+USE stock_data;
+
+stock_price_snapshotsys_configcreate_synonym_dbdiagnosticsCREATE TABLE IF NOT EXISTS stock_price_snapshot (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    shcode VARCHAR(10),
+    hname VARCHAR(50),
+    price INT,
+    change_amt INT,
+    change_pct FLOAT,
+    volume INT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+);
