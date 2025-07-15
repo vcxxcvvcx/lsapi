@@ -1,0 +1,91 @@
+import asyncio
+import pymysql
+from ebest import OpenApi
+from app_keys import appkey, appsecretkey
+
+STOCK_LIST = [ #t1102 초당 3건만 호출가능
+    ("삼성전자", "005930"),
+    ("SK하이닉스", "000660"),
+    ("LG에너지솔루션", "373220"),
+    ("삼성바이오로직스", "207940"),
+    ("현대차", "005380")
+]
+
+# MySQL 연결 정보
+MYSQL_CONFIG = {
+    'host': 'localhost',
+    'user': 'root',
+    'password': '5737',  # ← 본인 비밀번호로 변경
+    'database': 'stock_data',
+    'charset': 'utf8mb4'
+}
+
+# DB 저장 함수
+def save_snapshot(data):
+    try:
+        sign = data['sign']  # "1": 상승, "2": 보합, "3": 하락
+        change = int(data['change'])
+
+        # 등락 부호 반영
+        if sign == "1":
+            change_amt = change
+        elif sign == "3":
+            change_amt = -change
+        else:
+            change_amt = 0
+
+        with pymysql.connect(**MYSQL_CONFIG) as conn:
+            with conn.cursor() as cur:
+                sql = """
+                INSERT INTO stock_price_snapshot (
+                    shcode, hname, price, change_amt, change_pct, volume
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """
+                cur.execute(sql, (
+                    data['shcode'],
+                    data['hname'],
+                    int(data['price']),
+                    change_amt,
+                    float(data['diff']),
+                    int(data['volume'])
+                ))
+            conn.commit()
+        print(f"✅ 저장 완료: {data['hname']} {data['price']}원, 거래량 {data['volume']}")
+    except Exception as e:
+        print(f"❌ DB 저장 실패: {e}")
+
+# 종목 하나 요청해서 저장
+async def fetch_one_stock(api, shcode):
+    request = {
+        't1102InBlock': {
+            'shcode': shcode
+        }
+    }
+    response = await api.request('t1102', request)
+    if response:
+        data = response.body['t1102OutBlock']
+        save_snapshot(data)
+    else:
+        print(f"❌ 요청 실패: {api.last_message} (종목코드: {shcode})")
+
+async def fetch_all():
+    api = OpenApi()
+    if not await api.login(appkey, appsecretkey):
+        print(f"❌ 로그인 실패: {api.last_message}")
+        return
+
+    for idx, (name, shcode) in enumerate(STOCK_LIST):
+        await fetch_one_stock(api, shcode)
+        if idx % 3 == 2:  # 매 3건마다 쉬어 초과호출을 방지하고자 할때 
+            await asyncio.sleep(1)
+    
+    
+    # for name, shcode in STOCK_LIST:
+    #     await fetch_one_stock(api, shcode)
+    #     await asyncio.sleep(1)  # 호출 건수 초과 방지용 1초에 하나씩 호출할때
+
+    await api.close()
+
+
+if __name__ == '__main__':
+    asyncio.run(fetch_all())
