@@ -1,0 +1,85 @@
+# 이코드는 현재 종목명, 종목코드, 현재가(원), 등락률(%), 거래대금, 상장주식수, 총매도잔량, 총매수잔량 중 상장주식수, 총매도잔량, 총매수잔량을 불러오지 못하고 있음
+# 적절한 TR을 찾아서 넣어야할것같음
+
+import asyncio
+import pymysql
+from datetime import datetime
+from ebest import OpenApi
+from app_keys import appkey, appsecretkey
+
+MYSQL_CONFIG = {
+    'host': 'localhost',
+    'user': 'root',
+    'password': '5737',
+    'database': 'stock_data',
+    'charset': 'utf8mb4'
+}
+
+# 저장 함수
+def save_snapshot(data, hname, listed_shares):
+    try:
+        total_offer = sum(int(data.get(f"offerrem{i}", 0)) for i in range(1, 11))
+        total_bid = sum(int(data.get(f"bidrem{i}", 0)) for i in range(1, 11))
+
+        with pymysql.connect(**MYSQL_CONFIG) as conn:
+            with conn.cursor() as cur:
+                sql = """
+                INSERT INTO stock_snapshot (
+                    shcode, hname, price, change_pct, amount,
+                    listed_shares, total_offer_qty, total_bid_qty, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
+                cur.execute(sql, (
+                    data['shcode'],
+                    hname,
+                    int(data['price']),
+                    float(data['diff']),
+                    int(data['value']),
+                    listed_shares,
+                    total_offer,
+                    total_bid,
+                    datetime.now()
+                ))
+            conn.commit()
+        print(f"✅ 저장 완료: {hname}")
+    except Exception as e:
+        print(f"❌ 저장 실패 ({data['shcode']}): {e}")
+
+# 종목 시세 조회
+async def fetch_one(api, stock):
+    shcode = stock['shcode']
+    hname = stock['hname']
+    listed = int(stock.get('listingshare', 0))
+
+    req = { 't1102InBlock': { 'shcode': shcode } }
+    res = await api.request('t1102', req)
+    if res:
+        save_snapshot(res.body['t1102OutBlock'], hname, listed)
+    else:
+        print(f"❌ 시세 요청 실패: {shcode} - {api.last_message}")
+
+# 전체 종목 수집
+async def fetch_all():
+    api = OpenApi()
+    await api.login(appkey, appsecretkey)
+
+    # t8436: 전체 상장 종목
+    res = await api.request('t8436', {'t8436InBlock': {'gubun': '1'}})
+    if not res:
+        print("❌ 종목 리스트 요청 실패")
+        return
+
+    stock_list = res.body['t8436OutBlock']
+
+    # 개별 시세 요청 (3개씩 처리 → 1초 대기)
+    for i in range(0, len(stock_list), 3):
+        batch = stock_list[i:i+3]
+        await asyncio.gather(*(fetch_one(api, stock) for stock in batch))
+        await asyncio.sleep(1)
+
+    await api.close()
+
+    print("✅ 전체 저장 완료")
+
+if __name__ == '__main__':
+    asyncio.run(fetch_all())
