@@ -10,7 +10,7 @@ from app_keys import appkey, appsecretkey
 MYSQL_CONFIG = {
     'host': 'localhost',
     'user': 'root',
-    'password': '5737',
+    'password': '####',
     'database': 'stock_data',
     'charset': 'utf8mb4'
 }
