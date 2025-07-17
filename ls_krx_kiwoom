@@ -1,0 +1,143 @@
+import asyncio
+import pymysql
+import requests
+from datetime import datetime
+from ebest import OpenApi
+from app_keys import appkey, appsecretkey
+from pykrx.stock import get_market_cap_by_ticker
+from kiwoom_key import token  # 키움 인증 토큰 불러오기
+
+# 오늘 날짜 (yyyymmdd)
+today = datetime.today().strftime("%Y%m%d")
+
+# 🔁 PyKRX 마켓캡 데이터 로딩
+try:
+    df_market_cap = get_market_cap_by_ticker(today)
+except Exception as e:
+    print(f"❌ pykrx 마켓캡 로딩 실패: {e}")
+    df_market_cap = None
+
+# MySQL 접속 설정
+MYSQL_CONFIG = {
+    'host': 'localhost',
+    'user': 'root',
+    'password': '5737',
+    'database': 'stock_data',
+    'charset': 'utf8mb4'
+}
+
+# 안전한 정수 변환
+def safe_int(value):
+    try:
+        return int(str(value).replace(',', '').strip())
+    except:
+        return 0
+
+# ⛽ PyKRX에서 상장주식수 보완
+def get_fallback_listed_shares(shcode):
+    try:
+        code = shcode.zfill(6)
+        if df_market_cap is not None and code in df_market_cap.index:
+            return int(df_market_cap.loc[code]['상장주식수'])
+    except Exception as e:
+        print(f"⚠️ pykrx에서 {shcode} 조회 실패: {e}")
+    return 0
+
+# ✅ 키움 API를 통해 총잔량 정보 가져오기
+def get_total_qty_from_kiwoom(shcode):
+    url = "https://api.kiwoom.com/api/dostk/mrkcond"
+    headers = {
+        "Content-Type": "application/json;charset=UTF-8",
+        "authorization": f"Bearer {token}",
+        "api-id": "ka10004"
+    }
+    payload = { "stk_cd": shcode.zfill(6) }  # 종목코드
+
+    try:
+        res = requests.post(url, headers=headers, json=payload)
+        if res.status_code == 200:
+            js = res.json()
+            return (
+                safe_int(js.get("tot_sel_req", 0)),  # 총매도잔량
+                safe_int(js.get("tot_buy_req", 0))   # 총매수잔량
+            )
+        else:
+            print(f"❌ 키움 요청 실패 {shcode}: {res.status_code}")
+    except Exception as e:
+        print(f"❌ 키움 예외 {shcode}: {e}")
+    return (0, 0)
+
+# ✅ MySQL에 저장
+def save_snapshot(data1102, data3320, hname):
+    try:
+        listed_shares = safe_int(data3320.get('gstock'))
+        if listed_shares == 0:
+            listed_shares = get_fallback_listed_shares(data1102.get('shcode'))
+
+        # 키움에서 총 매도/매수잔량 조회
+        shcode = data1102.get('shcode')
+        total_offer, total_bid = get_total_qty_from_kiwoom(shcode)
+
+        with pymysql.connect(**MYSQL_CONFIG) as conn:
+            with conn.cursor() as cur:
+                sql = """
+                INSERT INTO stock_snapshot (
+                    shcode, hname, price, change_pct, amount,
+                    listed_shares, total_offer_qty, total_bid_qty, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
+                cur.execute(sql, (
+                    shcode,
+                    hname,
+                    safe_int(data1102.get('price')),
+                    float(data1102.get('diff', 0)),
+                    safe_int(data1102.get('value')),
+                    listed_shares,
+                    total_offer,
+                    total_bid,
+                    datetime.now()
+                ))
+            conn.commit()
+        print(f"✅ 저장 완료: {hname}")
+    except Exception as e:
+        print(f"❌ 저장 실패 ({data1102.get('shcode')}): {e}")
+
+# 종목 1개 처리
+async def fetch_one(api, stock):
+    shcode = stock['shcode']
+    hname = stock['hname']
+
+    try:
+        res1102 = await api.request('t1102', {'t1102InBlock': {'shcode': shcode}})
+        await asyncio.sleep(1)
+        res3320 = await api.request('t3320', {'t3320InBlock': {'gicode': 'A' + shcode}})
+        await asyncio.sleep(1)
+
+        if res1102 and res3320:
+            data1102 = res1102.body.get('t1102OutBlock', {})
+            data3320 = res3320.body.get('t3320OutBlock', {})
+            save_snapshot(data1102, data3320, hname)
+        else:
+            print(f"❌ TR 실패: {shcode}")
+    except Exception as e:
+        print(f"❌ 예외 발생 ({shcode}): {e}")
+
+# 전체 종목 반복 처리
+async def fetch_all():
+    api = OpenApi()
+    await api.login(appkey, appsecretkey)
+
+    res = await api.request('t8436', {'t8436InBlock': {'gubun': '1'}})
+    if not res:
+        print("❌ 종목 리스트 요청 실패")
+        return
+
+    stock_list = res.body['t8436OutBlock']
+    for stock in stock_list:
+        await fetch_one(api, stock)
+
+    await api.close()
+    print("✅ 전체 저장 완료")
+
+if __name__ == '__main__':
+    asyncio.run(fetch_all())
